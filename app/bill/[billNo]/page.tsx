@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useEffect, useState, use } from "react";
+import React, { useEffect, useState, use, Suspense } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
 import {
   Download,
@@ -19,7 +20,9 @@ import {
   Calendar,
   User,
   MapPin,
-  Sparkles
+  Sparkles,
+  Lock,
+  ShieldAlert
 } from "lucide-react";
 import { BillSettings, DEFAULT_BILL_SETTINGS } from "../../billing/billing-config";
 import { apiGetSettings } from "../../billing/lib/api";
@@ -106,40 +109,43 @@ interface BillData {
   discountPercent: number;
   discountAmount: number;
   grandTotal: number;
+  shareToken?: string;
   notes?: string;
   createdAt: string;
 }
 
-export default function PublicDigitalBillPage({
-  params,
-}: {
-  params: Promise<{ billNo: string }>;
-}) {
-  const resolvedParams = use(params);
-  const billNo = resolvedParams.billNo;
+function DigitalBillContent({ billNo }: { billNo: string }) {
+  const searchParams = useSearchParams();
+  const token = searchParams ? searchParams.get("token") || searchParams.get("key") : "";
 
   const [bill, setBill] = useState<BillData | null>(null);
   const [settings, setSettings] = useState<BillSettings>(DEFAULT_BILL_SETTINGS);
   const [loading, setLoading] = useState(true);
+  const [isLocked, setIsLocked] = useState(false);
   const [error, setError] = useState("");
   const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   useEffect(() => {
     async function loadData() {
       setLoading(true);
+      setIsLocked(false);
       try {
-        // 1. Fetch live bill from backend
-        const res = await fetch(`http://localhost:5000/api/bills/${billNo}`, {
+        const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
+        const res = await fetch(`http://localhost:5000/api/bills/${billNo}${tokenQuery}`, {
           cache: "no-store",
         });
         const result = await res.json();
-        if (result.success && result.data) {
+
+        if (res.status === 403 || result.isLocked) {
+          setIsLocked(true);
+          setError(result.message || "This invoice is protected for customer privacy.");
+        } else if (result.success && result.data) {
           setBill(result.data);
         } else {
           setError(result.message || `Invoice ${billNo} not found`);
         }
 
-        // 2. Fetch live settings
+        // Fetch live settings
         const dbSettings = await apiGetSettings();
         if (dbSettings) setSettings(dbSettings);
       } catch (err: any) {
@@ -149,12 +155,12 @@ export default function PublicDigitalBillPage({
       }
     }
     loadData();
-  }, [billNo]);
+  }, [billNo, token]);
 
   // Download PDF Handler
   const handleDownloadPdf = async () => {
     setDownloadingPdf(true);
-    const success = await exportElementToPdf(
+    await exportElementToPdf(
       "printable-bill",
       `GLITCH-INVOICE-${billNo}.pdf`
     );
@@ -181,7 +187,59 @@ export default function PublicDigitalBillPage({
         </div>
         <div className="text-center space-y-1">
           <p className="text-xs font-bold text-white">GLITCH DIGITAL INVOICE PORTAL</p>
-          <p className="text-[10px] font-mono text-zinc-400">Fetching invoice {billNo} from MongoDB...</p>
+          <p className="text-[10px] font-mono text-zinc-400">Verifying secure access for invoice {billNo}...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Locked State: Missing or invalid token
+  if (isLocked) {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center text-white p-4 font-sans antialiased">
+        <div className="max-w-md w-full p-8 rounded-3xl bg-zinc-900/90 border border-zinc-800 text-center space-y-5 shadow-2xl backdrop-blur-xl">
+          <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center mx-auto shadow-inner">
+            <ShieldAlert className="w-8 h-8" />
+          </div>
+
+          <div className="space-y-2">
+            <span className="text-[10px] px-2.5 py-1 rounded-full bg-amber-950/80 text-amber-300 font-mono font-bold border border-amber-800 uppercase tracking-wider">
+              {billNo} • Protected
+            </span>
+            <h1 className="text-lg font-black text-white">Protected Customer Invoice</h1>
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              This invoice contains private customer information and is protected against unauthorized access.
+            </p>
+          </div>
+
+          <div className="p-4 rounded-2xl bg-zinc-950/80 border border-zinc-800/80 text-xs text-zinc-300 space-y-2 text-left">
+            <p className="font-semibold text-white flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5 text-amber-400" />
+              <span>How to open this bill:</span>
+            </p>
+            <p className="text-[11px] text-zinc-400">
+              Please tap the official secure invoice link sent directly to your registered mobile number on WhatsApp.
+            </p>
+          </div>
+
+          <div className="pt-2 flex flex-col sm:flex-row gap-2.5">
+            <a
+              href="https://api.whatsapp.com/send?phone=917778978723&text=Hello%20GLITCH,%20I%20need%20assistance%20accessing%20my%20invoice."
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition active:scale-95 shadow-lg shadow-emerald-600/20"
+            >
+              <Smartphone className="w-4 h-4" />
+              <span>Store Helpline</span>
+            </a>
+
+            {/* <Link
+              href="/"
+              className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-bold text-xs transition"
+            >
+              <span>Back to Store</span>
+            </Link> */}
+          </div>
         </div>
       </div>
     );
@@ -211,11 +269,11 @@ export default function PublicDigitalBillPage({
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans print:bg-white print:text-black antialiased selection:bg-white selection:text-black">
-      
+
       {/* Top Customer Action Bar (Hidden during print) */}
       <header className="sticky top-0 z-50 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur-md px-4 lg:px-8 py-3.5 print:hidden">
         <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-3">
-          
+
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-full bg-black overflow-hidden ring-1 ring-zinc-700 relative flex-shrink-0">
               <Image
@@ -263,7 +321,7 @@ export default function PublicDigitalBillPage({
 
       {/* Main Container */}
       <main className="max-w-6xl mx-auto px-4 py-6 print:p-0 print:max-w-none flex flex-col items-center">
-        
+
         {/* Customer Thank You Banner (Hidden in Print) */}
         <div className="w-full mb-4 p-3.5 rounded-2xl bg-zinc-900/60 border border-zinc-800/80 flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-300 print:hidden">
           <div className="flex items-center gap-2">
@@ -296,11 +354,11 @@ export default function PublicDigitalBillPage({
           }}
         >
           <div className="relative z-10 flex flex-col justify-between p-4 sm:p-5 text-zinc-900 text-xs min-h-[480px]">
-            
+
             {/* 1. TOP HEADER */}
             <div className="border-b-2 border-zinc-900 pb-2.5">
               <div className="flex items-start justify-between gap-4">
-                
+
                 {/* Brand Details */}
                 <div className="flex items-start gap-3">
                   <div className="w-13 h-13 relative flex-shrink-0 bg-black rounded-full overflow-hidden border border-zinc-800 shadow-sm">
@@ -368,7 +426,7 @@ export default function PublicDigitalBillPage({
             {/* 2. CUSTOMER & INVOICE DETAILS */}
             <div className="bg-zinc-100/90 border-b border-zinc-300 py-1.5 px-2.5 my-1.5 rounded text-[10px] leading-tight">
               <div className="grid grid-cols-12 gap-2 items-center">
-                
+
                 <div className="col-span-12 sm:col-span-7 flex flex-wrap items-center gap-3">
                   <div>
                     <span className="text-zinc-500 font-bold uppercase text-[9px]">Buyer: </span>
@@ -420,7 +478,7 @@ export default function PublicDigitalBillPage({
 
             {/* 3. PRODUCT DETAILS TABLE WITH UNCLIPPED WATERMARK */}
             <div className="flex-1 my-1 relative">
-              
+
               {/* Unclipped Center Watermark */}
               {settings.watermark.enabled && (
                 <div
@@ -496,10 +554,10 @@ export default function PublicDigitalBillPage({
             {/* 4. TOTALS & FOOTER */}
             <div className="border-t-2 border-zinc-900 pt-2 mt-2">
               <div className="grid grid-cols-12 gap-3 items-end">
-                
+
                 {/* Bottom Left: Dual QR Codes & Terms */}
                 <div className="col-span-12 sm:col-span-7 flex items-start gap-4">
-                  
+
                   {/* QR 1: Instagram */}
                   <div className="flex flex-col items-center bg-zinc-50 border border-zinc-300 rounded p-1 shadow-xs">
                     <QRCodeSVG
@@ -616,5 +674,27 @@ export default function PublicDigitalBillPage({
         }
       `}</style>
     </div>
+  );
+}
+
+export default function PublicDigitalBillPage({
+  params,
+}: {
+  params: Promise<{ billNo: string }>;
+}) {
+  const resolvedParams = use(params);
+  const billNo = resolvedParams.billNo;
+
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-black flex flex-col items-center justify-center text-white space-y-4 font-sans">
+          <div className="w-12 h-12 rounded-full border-2 border-zinc-700 border-t-white animate-spin" />
+          <p className="text-xs font-mono text-zinc-400">Loading invoice {billNo}...</p>
+        </div>
+      }
+    >
+      <DigitalBillContent billNo={billNo} />
+    </Suspense>
   );
 }

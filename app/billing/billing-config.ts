@@ -57,6 +57,7 @@ export interface SavedBill {
   discountPercent: number;
   discountAmount: number;
   grandTotal: number;
+  shareToken?: string;
   createdAt: string;
 }
 
@@ -204,8 +205,8 @@ export function saveBillToHistory(bill: SavedBill): void {
   if (typeof window === "undefined") return;
   try {
     const existing = getSavedBills();
-    // filter out if same id already exists to update it or prepend new
-    const filtered = existing.filter((b) => b.id !== bill.id);
+    // filter out if same invoiceNo or id already exists to update it or prepend new
+    const filtered = existing.filter((b) => b.invoiceNo !== bill.invoiceNo && b.id !== bill.id);
     const updated = [bill, ...filtered];
     localStorage.setItem(SAVED_BILLS_STORAGE_KEY, JSON.stringify(updated));
   } catch (e) {

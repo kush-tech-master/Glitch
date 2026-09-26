@@ -133,7 +133,7 @@ async function seedDatabase() {
     const totalCategories = await Category.countDocuments();
     console.log(`✓ ${totalCategories} Categories verified/saved in MongoDB Atlas.`);
 
-    // 4. Seed Admin User
+    // 4. Seed Admin User 
     const User = require('./models/User');
     const existingAdmin = await User.findOne({ email: 'admin@glitchclothing.com' });
     if (existingAdmin) {

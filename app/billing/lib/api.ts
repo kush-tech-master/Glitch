@@ -59,7 +59,10 @@ export async function apiGetAllBills(search?: string): Promise<SavedBill[] | nul
     const url = search
       ? `${API_BASE_URL}/bills?search=${encodeURIComponent(search)}`
       : `${API_BASE_URL}/bills?limit=100`;
-    const res = await fetch(url, { cache: 'no-store' });
+    const res = await fetch(url, { 
+      cache: 'no-store',
+      headers: { 'x-pos-client': 'glitch-pos' },
+    });
     if (res.ok) {
       const result = await res.json();
       // Map MongoDB bills to frontend structure
@@ -71,16 +74,71 @@ export async function apiGetAllBills(search?: string): Promise<SavedBill[] | nul
         customerMobile: b.customer?.mobile || '',
         customerCity: b.customer?.city || 'Modasa',
         paymentMode: b.paymentMode || 'Cash',
-        items: b.items || [],
+        items: (b.items || []).map((i: any, idx: number) => ({
+          id: i.id || i._id || `${b.billNo}_${idx}_${Date.now()}`,
+          code: i.code || '',
+          company: i.company || 'GLITCH',
+          category: i.category || 'T-Shirt',
+          size: i.size || 'L',
+          qty: Number(i.qty) || 1,
+          rate: Number(i.rate) || 0,
+          amount: Number(i.amount) || 0,
+        })),
         grossSubTotal: b.grossSubTotal,
         discountPercent: b.discountPercent,
         discountAmount: b.discountAmount,
         grandTotal: b.grandTotal,
+        shareToken: b.shareToken,
         createdAt: b.createdAt,
       }));
     }
   } catch (e) {
     console.warn('Backend offline, falling back to localStorage history:', e);
+  }
+  return null;
+}
+
+// Get single bill by ID or Bill No from MongoDB
+export async function apiGetBillById(idOrBillNo: string, token?: string): Promise<SavedBill | null> {
+  try {
+    const query = token ? `?token=${encodeURIComponent(token)}` : '?internal=true';
+    const res = await fetch(`${API_BASE_URL}/bills/${encodeURIComponent(idOrBillNo)}${query}`, {
+      cache: 'no-store',
+      headers: { 'x-pos-client': 'glitch-pos' },
+    });
+    if (res.ok) {
+      const result = await res.json();
+      if (result.success && result.data) {
+        const b = result.data;
+        return {
+          id: b._id || b.billNo,
+          invoiceNo: b.billNo,
+          date: b.billDate,
+          customerName: b.customer?.name || 'Walk-in Customer',
+          customerMobile: b.customer?.mobile || '',
+          customerCity: b.customer?.city || 'Modasa',
+          paymentMode: b.paymentMode || 'Cash',
+          items: (b.items || []).map((i: any, idx: number) => ({
+            id: i.id || i._id || `${b.billNo}_${idx}_${Date.now()}`,
+            code: i.code || '',
+            company: i.company || 'GLITCH',
+            category: i.category || 'T-Shirt',
+            size: i.size || 'L',
+            qty: Number(i.qty) || 1,
+            rate: Number(i.rate) || 0,
+            amount: Number(i.amount) || 0,
+          })),
+          grossSubTotal: b.grossSubTotal,
+          discountPercent: b.discountPercent,
+          discountAmount: b.discountAmount,
+          grandTotal: b.grandTotal,
+          shareToken: b.shareToken,
+          createdAt: b.createdAt,
+        };
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to fetch bill by ID from MongoDB:', e);
   }
   return null;
 }

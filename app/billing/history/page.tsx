@@ -68,10 +68,10 @@ export default function BillHistoryPage() {
   };
 
   const handleLoadBill = (bill: SavedBill) => {
-    // Save as active draft for /billing
+    // Save as active draft for /billing and navigate with query parameter
     if (typeof window !== "undefined") {
       localStorage.setItem("glitch_active_bill_draft", JSON.stringify(bill));
-      router.push("/billing?loaded=true");
+      router.push(`/billing?edit=${encodeURIComponent(bill.invoiceNo)}`);
     }
   };
 

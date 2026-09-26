@@ -33,7 +33,8 @@ import {
   LogOut,
   Download
 } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense } from "react";
 import { clearAuthSession, getAuthUser } from "./lib/auth";
 import { exportElementToPdf } from "./lib/pdfGenerator";
 import {
@@ -44,11 +45,13 @@ import {
   SIZE_OPTIONS,
   loadBillSettings,
   saveBillToHistory,
+  getSavedBills,
   SavedBill
 } from "./billing-config";
 import {
   apiGetNextBillNumber,
   apiSaveBill,
+  apiGetBillById,
   apiGetCompanies,
   apiGetCategories,
   apiGetSettings
@@ -121,18 +124,21 @@ interface ProductItem {
   amount: number;
 }
 
-export default function BillingPage() {
+function BillingContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const editQuery = searchParams ? searchParams.get("edit") || searchParams.get("billNo") : null;
+
   // Loaded Settings from Bill Settings Page / MongoDB
   const [settings, setSettings] = useState<BillSettings>(DEFAULT_BILL_SETTINGS);
   const [companies, setCompanies] = useState<string[]>(COMPANY_OPTIONS);
   const [categories, setCategories] = useState<string[]>(CATEGORY_OPTIONS);
 
-  // Customer Details Inputs (Empty for every new bill)
+  // Customer Details Inputs (Empty for every new bill, mobile is strictly required)
   const [customer, setCustomer] = useState({
     name: "",
     mobile: "",
-    city: "",
+    city: "Modasa",
   });
 
   // Invoice Details Inputs
@@ -141,6 +147,20 @@ export default function BillingPage() {
     date: new Date().toISOString().split("T")[0],
     paymentMode: "Cash",
   });
+
+  // Editing existing invoice state
+  const [isEditingInvoice, setIsEditingInvoice] = useState<boolean>(false);
+  const [currentShareToken, setCurrentShareToken] = useState<string>("");
+
+  // Validation modal state (Replaces default browser alert)
+  const [validationModal, setValidationModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    fieldToFocus?: string;
+  } | null>(null);
+
+  const mobileInputRef = useRef<HTMLInputElement>(null);
 
   // Helper to generate unique item code in same bill
   const generateUniqueCode = (existingItems: ProductItem[] = []) => {
@@ -177,7 +197,7 @@ export default function BillingPage() {
   // New Bill Confirmation Modal State
   const [showNewBillModal, setShowNewBillModal] = useState<boolean>(false);
 
-  // Load settings and check for active draft or fetch next bill number on mount
+  // Load settings and check for active draft or fetch next bill number on mount / edit query change
   useEffect(() => {
     setSettings(loadBillSettings());
 
@@ -194,44 +214,77 @@ export default function BillingPage() {
       if (dbCategories && dbCategories.length > 0) setCategories(dbCategories);
     });
 
-    // 3. Check if user came from "Saved Invoices" to load a bill
-    let isDraftLoaded = false;
-    if (typeof window !== "undefined") {
-      const draft = localStorage.getItem("glitch_active_bill_draft");
-      if (draft) {
-        try {
-          const parsed = JSON.parse(draft) as SavedBill;
-          setCustomer({
-            name: parsed.customerName || "",
-            mobile: parsed.customerMobile || "",
-            city: parsed.customerCity || "",
-          });
-          setInvoiceMeta({
-            invoiceNo: parsed.invoiceNo || "GL-00001",
-            date: parsed.date || new Date().toISOString().split("T")[0],
-            paymentMode: parsed.paymentMode || "Cash",
-          });
-          setDiscountPercent(parsed.discountPercent || 0);
-          if (parsed.items && parsed.items.length > 0) {
-            setItems(parsed.items);
+    async function initializeBill() {
+      let loadedBill: SavedBill | null = null;
+
+      // Check if target bill was passed via URL
+      if (editQuery) {
+        loadedBill = await apiGetBillById(editQuery);
+      }
+
+      // Check if user came from "Saved Invoices" draft in localStorage
+      if (!loadedBill && typeof window !== "undefined") {
+        const draft = localStorage.getItem("glitch_active_bill_draft");
+        if (draft) {
+          try {
+            loadedBill = JSON.parse(draft) as SavedBill;
+          } catch (e) {
+            console.error("Failed to parse draft:", e);
           }
-          isDraftLoaded = true;
+        }
+      }
+
+      // Check if bill exists in local saved history
+      if (!loadedBill && editQuery && typeof window !== "undefined") {
+        const saved = getSavedBills();
+        loadedBill = saved.find((b) => b.invoiceNo === editQuery) || null;
+      }
+
+      if (loadedBill) {
+        setCustomer({
+          name: loadedBill.customerName || "",
+          mobile: loadedBill.customerMobile || "",
+          city: loadedBill.customerCity || "Modasa",
+        });
+        setInvoiceMeta({
+          invoiceNo: loadedBill.invoiceNo || "GL-00001",
+          date: loadedBill.date || new Date().toISOString().split("T")[0],
+          paymentMode: loadedBill.paymentMode || "Cash",
+        });
+        setDiscountPercent(loadedBill.discountPercent || 0);
+        if (loadedBill.items && loadedBill.items.length > 0) {
+          setItems(
+            loadedBill.items.map((i: any, idx: number) => ({
+              id: i.id || i._id || `${Date.now()}_${idx}`,
+              code: i.code || "",
+              company: i.company || "GLITCH",
+              category: i.category || "T-Shirt",
+              size: i.size || "L",
+              qty: Number(i.qty) || 1,
+              rate: Number(i.rate) || 0,
+              amount: Number(i.amount) || 0,
+            }))
+          );
+        }
+        setIsEditingInvoice(true);
+        if (loadedBill.shareToken) {
+          setCurrentShareToken(loadedBill.shareToken);
+        }
+        if (typeof window !== "undefined") {
           localStorage.removeItem("glitch_active_bill_draft");
-        } catch (e) {
-          console.error("Failed to load draft:", e);
+        }
+      } else {
+        setIsEditingInvoice(false);
+        setCurrentShareToken("");
+        const nextNo = await apiGetNextBillNumber();
+        if (nextNo) {
+          setInvoiceMeta((prev) => ({ ...prev, invoiceNo: nextNo }));
         }
       }
     }
 
-    // 4. If no draft loaded, fetch next sequential bill number from MongoDB
-    if (!isDraftLoaded) {
-      apiGetNextBillNumber().then((nextNo) => {
-        if (nextNo) {
-          setInvoiceMeta((prev) => ({ ...prev, invoiceNo: nextNo }));
-        }
-      });
-    }
-  }, []);
+    initializeBill();
+  }, [editQuery]);
 
   // Check for duplicate codes in bill
   const duplicateCodes = items
@@ -258,7 +311,11 @@ export default function BillingPage() {
   // Remove Item Row
   const handleRemoveItem = (id: string) => {
     if (items.length <= 1) {
-      alert("A bill requires at least 1 line item.");
+      setValidationModal({
+        isOpen: true,
+        title: "Cannot Remove Item",
+        message: "A bill requires at least 1 line item.",
+      });
       return;
     }
     setItems(items.filter((item) => item.id !== id));
@@ -294,6 +351,8 @@ export default function BillingPage() {
 
   // Confirm Start New Bill (All empty inputs & next sequential bill no from MongoDB)
   const handleConfirmNewBill = async () => {
+    setIsEditingInvoice(false);
+    setCurrentShareToken("");
     const nextNo = await apiGetNextBillNumber();
     setInvoiceMeta({
       invoiceNo: nextNo || `GL-0${Math.floor(1000 + Math.random() * 9000)}`,
@@ -303,7 +362,7 @@ export default function BillingPage() {
     setCustomer({
       name: "",
       mobile: "",
-      city: "",
+      city: "Modasa",
     });
     setDiscountPercent(0);
     setItems([
@@ -319,6 +378,34 @@ export default function BillingPage() {
       },
     ]);
     setShowNewBillModal(false);
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("glitch_active_bill_draft");
+    }
+    router.replace("/billing");
+  };
+
+  // Validation function: Mobile number is mandatory (10 digits) & at least 1 item
+  const validateInvoice = (): boolean => {
+    const cleanMobile = (customer.mobile || "").trim().replace(/\D/g, "");
+    if (!cleanMobile || cleanMobile.length !== 10) {
+      setValidationModal({
+        isOpen: true,
+        title: "Customer Mobile Number Required",
+        message:
+          "Please enter a valid 10-digit customer mobile number. Without a mobile number, an invoice cannot be created, printed, downloaded as PDF, or shared on WhatsApp.",
+        fieldToFocus: "mobile",
+      });
+      return false;
+    }
+    if (!items || items.length === 0) {
+      setValidationModal({
+        isOpen: true,
+        title: "Product Items Required",
+        message: "An invoice must contain at least 1 product item with valid price.",
+      });
+      return false;
+    }
+    return true;
   };
 
   // Calculations
@@ -337,41 +424,68 @@ export default function BillingPage() {
 
   // Direct PDF Download on POS
   const handleDownloadPdf = async () => {
+    if (!validateInvoice()) return;
     setDownloadingPdf(true);
-    // Auto-save to MongoDB
-    apiSaveBill({
-      billNo: invoiceMeta.invoiceNo,
-      billDate: invoiceMeta.date,
-      customer: {
-        name: customer.name || "Walk-in Customer",
-        mobile: customer.mobile || "",
-        city: customer.city || "Modasa",
-      },
-      paymentMode: invoiceMeta.paymentMode,
-      items: items,
-      grossSubTotal: grossSubTotal,
-      discountPercent: discountPercent,
-      discountAmount: discountAmount,
-      grandTotal: grandTotal,
-    });
-    await exportElementToPdf("printable-bill", `GLITCH-INVOICE-${invoiceMeta.invoiceNo}.pdf`);
-    setDownloadingPdf(false);
+    try {
+      // Auto-save or update to MongoDB
+      const saveRes = await apiSaveBill({
+        billNo: invoiceMeta.invoiceNo,
+        billDate: invoiceMeta.date,
+        customer: {
+          name: customer.name || "Walk-in Customer",
+          mobile: customer.mobile.trim(),
+          city: customer.city || "Modasa",
+        },
+        paymentMode: invoiceMeta.paymentMode,
+        items: items,
+        grossSubTotal: grossSubTotal,
+        discountPercent: discountPercent,
+        discountAmount: discountAmount,
+        grandTotal: grandTotal,
+      });
+
+      if (saveRes?.data?.shareToken) {
+        setCurrentShareToken(saveRes.data.shareToken);
+      }
+
+      // Save to localStorage history
+      const savedBillData: SavedBill = {
+        id: invoiceMeta.invoiceNo,
+        invoiceNo: invoiceMeta.invoiceNo,
+        date: invoiceMeta.date,
+        customerName: customer.name || "Walk-in Customer",
+        customerMobile: customer.mobile.trim(),
+        customerCity: customer.city || "Modasa",
+        paymentMode: invoiceMeta.paymentMode,
+        items: items,
+        grossSubTotal: grossSubTotal,
+        discountPercent: discountPercent,
+        discountAmount: discountAmount,
+        grandTotal: grandTotal,
+        shareToken: saveRes?.data?.shareToken || currentShareToken,
+        createdAt: new Date().toISOString(),
+      };
+      saveBillToHistory(savedBillData);
+
+      await exportElementToPdf("printable-bill", `GLITCH-INVOICE-${invoiceMeta.invoiceNo}.pdf`);
+    } catch (e) {
+      console.error("Failed to generate PDF:", e);
+    } finally {
+      setDownloadingPdf(false);
+    }
   };
 
   // WhatsApp Share with Direct Digital PDF Bill Link
-  const shareToWhatsapp = () => {
-    if (!customer.mobile) {
-      alert("Please enter customer mobile number first.");
-      return;
-    }
+  const shareToWhatsapp = async () => {
+    if (!validateInvoice()) return;
 
-    // Auto-save bill to MongoDB so the public link exists
-    apiSaveBill({
+    // Auto-save bill to MongoDB so the public link exists and obtain tamper-proof share token
+    const saveRes = await apiSaveBill({
       billNo: invoiceMeta.invoiceNo,
       billDate: invoiceMeta.date,
       customer: {
         name: customer.name || "Walk-in Customer",
-        mobile: customer.mobile || "",
+        mobile: customer.mobile.trim(),
         city: customer.city || "Modasa",
       },
       paymentMode: invoiceMeta.paymentMode,
@@ -382,13 +496,17 @@ export default function BillingPage() {
       grandTotal: grandTotal,
     });
 
+    const token = saveRes?.data?.shareToken || currentShareToken || "";
+    if (token) setCurrentShareToken(token);
+    const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
+
     const publicBillUrl = typeof window !== "undefined"
-      ? `${window.location.origin}/bill/${invoiceMeta.invoiceNo}`
-      : `http://localhost:3000/bill/${invoiceMeta.invoiceNo}`;
+      ? `${window.location.origin}/bill/${invoiceMeta.invoiceNo}${tokenQuery}`
+      : `http://localhost:3000/bill/${invoiceMeta.invoiceNo}${tokenQuery}`;
 
     const text = `*⚡ ${settings.topLeft.brandName} - ${settings.topLeft.tagline} | INVOICE ${invoiceMeta.invoiceNo}*\n\n` +
       `👤 *Customer:* ${customer.name || "Customer"} (${customer.city || "Modasa"})\n` +
-      `📱 *Mobile:* ${customer.mobile}\n` +
+      `📱 *Mobile:* ${customer.mobile.trim()}\n` +
       `📅 *Date:* ${invoiceMeta.date} | *Mode:* ${invoiceMeta.paymentMode}\n\n` +
       `🛍️ *Items (${totalQty} pcs):*\n` +
       items.map((i) => `• ${i.company} ${i.category} [${i.size}] x${i.qty} @ ₹${i.rate} = ₹${i.amount}`).join("\n") +
@@ -403,23 +521,25 @@ export default function BillingPage() {
       `📸 *Instagram:* ${settings.qrAndTerms.socialHandle}\n\n` +
       `_Thank you for shopping with ${settings.topLeft.brandName}!_ 🔥`;
 
-    window.open(`https://api.whatsapp.com/send?phone=91${customer.mobile}&text=${encodeURIComponent(text)}`, "_blank");
+    window.open(`https://api.whatsapp.com/send?phone=91${customer.mobile.trim()}&text=${encodeURIComponent(text)}`, "_blank");
   };
 
   // Open Print Modal
   const handleInitiatePrint = () => {
+    if (!validateInvoice()) return;
     setShowPrintModal(true);
   };
 
   // Confirm Print & Save Bill (Direct to MongoDB Atlas + localStorage fallback)
   const handleConfirmPrint = async () => {
+    if (!validateInvoice()) return;
     // 1. Save bill to MongoDB Atlas via Express API
     apiSaveBill({
       billNo: invoiceMeta.invoiceNo,
       billDate: invoiceMeta.date,
       customer: {
         name: customer.name || "Walk-in Customer",
-        mobile: customer.mobile || "",
+        mobile: customer.mobile.trim(),
         city: customer.city || "Modasa",
       },
       paymentMode: invoiceMeta.paymentMode,
@@ -432,11 +552,11 @@ export default function BillingPage() {
 
     // 2. Save bill to localStorage as backup
     const savedBillData: SavedBill = {
-      id: invoiceMeta.invoiceNo + "_" + Date.now(),
+      id: invoiceMeta.invoiceNo,
       invoiceNo: invoiceMeta.invoiceNo,
       date: invoiceMeta.date,
       customerName: customer.name || "Walk-in Customer",
-      customerMobile: customer.mobile || "N/A",
+      customerMobile: customer.mobile.trim(),
       customerCity: customer.city || "Modasa",
       paymentMode: invoiceMeta.paymentMode,
       items: items,
@@ -611,6 +731,33 @@ export default function BillingPage() {
          ------------------------------------------------------------------------- */}
       <main className="max-w-6xl mx-auto px-4 py-6 print:p-0 print:max-w-none flex flex-col items-center">
         
+        {/* Editing Existing Bill Indicator Banner */}
+        {isEditingInvoice && (
+          <div className="w-full mb-3 print:hidden">
+            <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/30 text-blue-300 text-xs flex flex-wrap items-center justify-between gap-3 shadow-lg">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-blue-400 animate-pulse flex-shrink-0" />
+                <p>
+                  <strong className="text-white font-bold">Currently Editing Saved Invoice:</strong>{" "}
+                  <span className="bg-blue-950/80 text-blue-200 px-2 py-0.5 rounded font-mono font-bold border border-blue-800">
+                    {invoiceMeta.invoiceNo}
+                  </span>
+                  <span className="text-zinc-400 ml-2 hidden sm:inline">
+                    (Downloading, Printing, or WhatsApp will update this invoice without creating duplicates)
+                  </span>
+                </p>
+              </div>
+              <button
+                onClick={handleNewBill}
+                className="px-3 py-1 rounded-lg bg-zinc-800 hover:bg-white hover:text-black text-zinc-200 text-[11px] font-bold transition flex items-center gap-1.5 shadow-sm"
+              >
+                <RefreshCw className="w-3 h-3" />
+                <span>Start New Invoice</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* THE HORIZONTAL BILL SLIP CONTAINER */}
         <div
           id="printable-bill"
@@ -712,13 +859,25 @@ export default function BillingPage() {
                   </div>
 
                   <div className="flex items-center gap-1">
-                    <span className="text-zinc-500 font-bold uppercase text-[9px]">Mo. No:</span>
+                    <span className="text-zinc-500 font-bold uppercase text-[9px] flex items-center gap-0.5">
+                      Mo. No <span className="text-red-600 font-black text-xs">*</span>:
+                    </span>
                     <input
-                      type="text"
+                      ref={mobileInputRef}
+                      type="tel"
+                      maxLength={10}
                       value={customer.mobile}
-                      onChange={(e) => setCustomer({ ...customer, mobile: e.target.value })}
-                      placeholder="Mobile No"
-                      className="bg-white/80 border border-zinc-300 rounded px-1.5 py-0.5 text-[10px] font-mono font-bold text-zinc-900 focus:bg-white focus:outline-none focus:border-zinc-900 w-24"
+                      onChange={(e) => {
+                        const val = e.target.value.replace(/\D/g, "").slice(0, 10);
+                        setCustomer({ ...customer, mobile: val });
+                      }}
+                      placeholder="10-digit Mo"
+                      title="Customer 10-digit mobile number (Required)"
+                      className={`bg-white/80 border ${
+                        !customer.mobile || customer.mobile.length !== 10
+                          ? "border-amber-400 focus:border-red-500 bg-amber-50/50"
+                          : "border-zinc-300 focus:border-zinc-900"
+                      } rounded px-1.5 py-0.5 text-[10.5px] font-mono font-bold text-zinc-900 focus:bg-white focus:outline-none w-28`}
                     />
                   </div>
 
@@ -1291,6 +1450,73 @@ export default function BillingPage() {
           }
         }
       `}</style>
+
+      {/* -------------------------------------------------------------------------
+          VALIDATION MODAL (Replaces browser alert with high quality UI)
+         ------------------------------------------------------------------------- */}
+      {validationModal && validationModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm print:hidden">
+          <div className="w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in duration-200">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2.5 text-white font-bold">
+                <div className="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                  <AlertTriangle className="w-4 h-4" />
+                </div>
+                <span className="text-sm">{validationModal.title}</span>
+              </div>
+              <button
+                onClick={() => {
+                  const field = validationModal.fieldToFocus;
+                  setValidationModal(null);
+                  if (field === "mobile") {
+                    setTimeout(() => mobileInputRef.current?.focus(), 100);
+                  }
+                }}
+                className="text-zinc-400 hover:text-white p-1 rounded-lg hover:bg-zinc-800 transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-zinc-950/70 border border-zinc-800/80 text-zinc-300 text-xs leading-relaxed">
+              {validationModal.message}
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-1">
+              <button
+                onClick={() => {
+                  const field = validationModal.fieldToFocus;
+                  setValidationModal(null);
+                  if (field === "mobile") {
+                    setTimeout(() => mobileInputRef.current?.focus(), 100);
+                  }
+                }}
+                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-white text-black hover:bg-zinc-200 text-xs font-black transition active:scale-95 shadow-lg shadow-white/5"
+              >
+                {validationModal.fieldToFocus === "mobile" ? "Enter Mobile Number" : "Okay, Got it"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
+  );
+}
+
+export default function BillingPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center font-sans">
+          <div className="flex items-center gap-2 text-zinc-400 text-xs">
+            <RefreshCw className="w-4 h-4 animate-spin text-white" />
+            <span>Loading GLITCH Billing POS...</span>
+          </div>
+        </div>
+      }
+    >
+      <BillingContent />
+    </Suspense>
   );
 }

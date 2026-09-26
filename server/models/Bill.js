@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 
 const billItemSchema = new mongoose.Schema({
   code: {
@@ -66,7 +67,7 @@ const billSchema = new mongoose.Schema(
       mobile: {
         type: String,
         trim: true,
-        default: '',
+        required: [true, 'Customer mobile number is required'],
       },
       city: {
         type: String,
@@ -126,16 +127,25 @@ const billSchema = new mongoose.Schema(
       trim: true,
       default: '',
     },
+    shareToken: {
+      type: String,
+      unique: true,
+      index: true,
+      default: () => crypto.randomBytes(16).toString('hex'),
+    },
   },
   {
     timestamps: true,
   }
 );
 
-// Auto compute total quantity before saving
+// Auto compute total quantity and ensure shareToken before saving
 billSchema.pre('save', function () {
   if (this.items && this.items.length > 0) {
     this.totalQty = this.items.reduce((sum, item) => sum + (item.qty || 1), 0);
+  }
+  if (!this.shareToken) {
+    this.shareToken = crypto.randomBytes(16).toString('hex');
   }
 });
 
